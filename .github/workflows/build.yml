@@ -1,0 +1,82 @@
+name: Build UCVisualDemoKit (iOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+          swift --version
+
+      # The source project is committed as one ZIP file so it can be uploaded
+      # easily from an iPhone. The ZIP contains UCVisualDemoKit/Package.swift.
+      - name: Extract source archive
+        run: |
+          SOURCE_ZIP="$GITHUB_WORKSPACE/UCVisualDemoKit-GitHubActions.zip"
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "Upload UCVisualDemoKit-GitHubActions.zip to the repository root first." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/ucvisual-source"
+          ditto -x -k "$SOURCE_ZIP" "$RUNNER_TEMP/ucvisual-source"
+          PACKAGE_FILE="$(find "$RUNNER_TEMP/ucvisual-source" -name Package.swift -print -quit)"
+          if [ -z "$PACKAGE_FILE" ]; then
+            echo "Package.swift was not found inside the ZIP." >&2
+            exit 1
+          fi
+          PACKAGE_DIR="$(dirname "$PACKAGE_FILE")"
+          echo "PACKAGE_DIR=$PACKAGE_DIR" >> "$GITHUB_ENV"
+          echo "Package directory: $PACKAGE_DIR"
+
+      - name: Resolve package
+        run: xcodebuild -resolvePackageDependencies -scheme UCVisualDemoKit -destination 'generic/platform=iOS'
+        working-directory: ${{ env.PACKAGE_DIR }}
+
+      - name: Build for generic iOS device
+        working-directory: ${{ env.PACKAGE_DIR }}
+        env:
+          DERIVED_DATA: ${{ runner.temp }}/UCVisualDemoKitDerivedData
+        run: |
+          xcodebuild \
+            -scheme UCVisualDemoKit \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$DERIVED_DATA" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package build products
+        if: success()
+        env:
+          DERIVED_DATA: ${{ runner.temp }}/UCVisualDemoKitDerivedData
+        run: |
+          PRODUCTS="$DERIVED_DATA/Build/Products/Release-iphoneos"
+          if [ ! -d "$PRODUCTS" ]; then
+            echo "Build products folder not found: $PRODUCTS" >&2
+            find "$DERIVED_DATA/Build/Products" -maxdepth 3 -print || true
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          ditto -c -k --sequesterRsrc --keepParent "$PRODUCTS" \
+            "$GITHUB_WORKSPACE/artifacts/UCVisualDemoKit-iOS-build.zip"
+          echo "Build products found:"
+          find "$PRODUCTS" -maxdepth 3 \( -name '*.framework' -o -name '*.dylib' -o -name '*.swiftmodule' \) -print
+
+      - name: Upload build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: UCVisualDemoKit-iOS-build
+          path: artifacts/UCVisualDemoKit-iOS-build.zip
+          if-no-files-found: error
+          retention-days: 7
